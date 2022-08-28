@@ -239,7 +239,7 @@ should always be in sync with it -->
         </in-device>
         <out-device>
             <id>PAL_DEVICE_OUT_SPEAKER</id>
-            <back_end_name>CODEC_DMA-LPAIF_RXTX-RX-1</back_end_name>
+            <back_end_name>CODEC_DMA-LPAIF_RXTX-RX-0</back_end_name>
             <max_channels>2</max_channels>
             <channels>1</channels>
             <samplerate>48000</samplerate>
@@ -267,86 +267,6 @@ should always be in sync with it -->
             <channels>1</channels>
             <samplerate>48000</samplerate>
             <snd_device_name>handset</snd_device_name>
-        </out-device>
-        <out-device>
-            <id>PAL_DEVICE_OUT_WIRED_HEADSET</id>
-            <back_end_name>CODEC_DMA-LPAIF_RXTX-RX-0</back_end_name>
-            <max_channels>2</max_channels>
-            <channels>2</channels>
-            <fractional_sr>1</fractional_sr>
-            <snd_device_name>headphones</snd_device_name>
-        <!--HIFI Filter Headphones-Uncomment this when param key hifi_filter is true
-            <usecase>
-                <name>PAL_STREAM_COMPRESSED</name>
-                <custom-config key="hifi-filter_custom_key">
-                    <snd_device_name>headphones-hifi-filter</snd_device_name>
-                </custom-config>
-            </usecase>
-            <usecase>
-                <name>PAL_STREAM_PCM_OFFLOAD</name>
-                <custom-config key="hifi-filter_custom_key">
-                    <snd_device_name>headphones-hifi-filter</snd_device_name>
-                </custom-config>
-            </usecase>
-            <usecase>
-                <name>PAL_STREAM_DEEP_BUFFER</name>
-                <custom-config key="hifi-filter_custom_key">
-                    <snd_device_name>headphones-hifi-filter</snd_device_name>
-                </custom-config>
-            </usecase>
-        -->
-           <usecase>
-               <name>PAL_STREAM_VOICE_CALL</name>
-               <priority>1</priority>
-               <samplerate>48000</samplerate>
-               <bit_width>16</bit_width>
-           </usecase>
-           <usecase>
-               <name>PAL_STREAM_VOIP_RX</name>
-               <priority>2</priority>
-               <samplerate>48000</samplerate>
-               <bit_width>16</bit_width>
-           </usecase>
-        </out-device>
-        <out-device>
-            <id>PAL_DEVICE_OUT_WIRED_HEADPHONE</id>
-            <back_end_name>CODEC_DMA-LPAIF_RXTX-RX-0</back_end_name>
-            <max_channels>2</max_channels>
-            <channels>2</channels>
-            <fractional_sr>1</fractional_sr>
-            <snd_device_name>headphones</snd_device_name>
-        <!--HIFI Filter Headphones-Uncomment this when param key hifi_filter is true
-            <usecase>
-                <name>PAL_STREAM_COMPRESSED</name>
-                <custom-config key="hifi-filter_custom_key">
-                    <snd_device_name>headphones-hifi-filter</snd_device_name>
-                </custom-config>
-            </usecase>
-            <usecase>
-                <name>PAL_STREAM_PCM_OFFLOAD</name>
-                <custom-config key="hifi-filter_custom_key">
-                    <snd_device_name>headphones-hifi-filter</snd_device_name>
-                </custom-config>
-            </usecase>
-            <usecase>
-                <name>PAL_STREAM_DEEP_BUFFER</name>
-                <custom-config key="hifi-filter_custom_key">
-                    <snd_device_name>headphones-hifi-filter</snd_device_name>
-                </custom-config>
-            </usecase>
-        -->
-           <usecase>
-               <name>PAL_STREAM_VOICE_CALL</name>
-               <priority>1</priority>
-               <samplerate>48000</samplerate>
-               <bit_width>16</bit_width>
-           </usecase>
-           <usecase>
-               <name>PAL_STREAM_VOIP_RX</name>
-               <priority>2</priority>
-               <samplerate>48000</samplerate>
-               <bit_width>16</bit_width>
-           </usecase>
         </out-device>
         <out-device>
             <id>PAL_DEVICE_OUT_BLUETOOTH_A2DP</id>
