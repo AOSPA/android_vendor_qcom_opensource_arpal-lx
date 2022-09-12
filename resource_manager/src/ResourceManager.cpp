@@ -180,8 +180,6 @@ char rmngr_xml_file[XML_PATH_MAX_LENGTH] = {0};
 char vendor_config_path[VENDOR_CONFIG_PATH_MAX_LENGTH] = {0};
 
 const std::vector<int> gSignalsOfInterest = {
-    SIGABRT,
-    SIGTERM,
     DEBUGGER_SIGNAL,
 };
 
@@ -1175,6 +1173,7 @@ int ResourceManager::init_audio()
                     strstr(snd_card_name, "sm8150") ||
                     strstr(snd_card_name, "lahaina") ||
                     strstr(snd_card_name, "waipio") ||
+                    strstr(snd_card_name, "ukee") ||
                     strstr(snd_card_name, "diwali") ||
                     strstr(snd_card_name, "bengal") ||
                     strstr(snd_card_name, "monaco") ||
@@ -2768,21 +2767,26 @@ int ResourceManager::isActiveStream(pal_stream_handle_t *handle) {
 
 int ResourceManager::initStreamUserCounter(Stream *s)
 {
+    lockActiveStream();
     mActiveStreamUserCounter.insert(std::make_pair(s, 0));
+    unlockActiveStream();
     return 0;
 }
 
 int ResourceManager::deinitStreamUserCounter(Stream *s)
 {
     std::map<Stream *, uint32_t>::iterator it;
+    lockActiveStream();
     printStreamUserCounter(s);
     it = mActiveStreamUserCounter.find(s);
     if (it != mActiveStreamUserCounter.end()) {
         PAL_INFO(LOG_TAG, "stream %p is to be erased.", s);
         mActiveStreamUserCounter.erase(it);
+        unlockActiveStream();
         return 0;
     } else {
         PAL_ERR(LOG_TAG, "stream %p is not found.", s);
+        unlockActiveStream();
         return -EINVAL;
     }
 }
@@ -3011,19 +3015,23 @@ int ResourceManager::registerDevice(std::shared_ptr<Device> d, Stream *s)
                     continue;
                 }
             }
-            updateECDeviceMap(dev, d, s, rxdevcount, false);
-            mResourceManagerMutex.unlock();
-            status = s->setECRef_l(dev, true);
-            mResourceManagerMutex.lock();
-            if (status) {
-                if(status != -ENODEV) {
-                    PAL_ERR(LOG_TAG, "Failed to enable EC Ref");
-                } else {
-                    status = 0;
-                    PAL_VERBOSE(LOG_TAG, "Failed to enable EC Ref because of -ENODEV");
+            rxdevcount = updateECDeviceMap(dev, d, s, rxdevcount, false);
+            if (rxdevcount <= 0) {
+                PAL_DBG(LOG_TAG, "No need to enable EC ref");
+            } else {
+                mResourceManagerMutex.unlock();
+                status = s->setECRef_l(dev, true);
+                mResourceManagerMutex.lock();
+                if (status) {
+                    if(status != -ENODEV) {
+                        PAL_ERR(LOG_TAG, "Failed to enable EC Ref");
+                    } else {
+                        status = 0;
+                        PAL_VERBOSE(LOG_TAG, "Failed to enable EC Ref because of -ENODEV");
+                    }
+                    // reset ec map if set ec failed for tx device
+                    updateECDeviceMap(dev, d, s, 0, true);
                 }
-                // reset ec map if set ec failed for tx device
-                updateECDeviceMap(dev, d, s, 0, true);
             }
         }
     } else if (sAttr.direction == PAL_AUDIO_OUTPUT &&
@@ -6245,8 +6253,7 @@ int32_t ResourceManager::streamDevDisconnect_l(std::vector <std::tuple<Stream *,
 
     /* disconnect active list from the current devices they are attached to */
     for (sIter = streamDevDisconnectList.begin(); sIter != streamDevDisconnectList.end(); sIter++) {
-        if ((std::get<0>(*sIter) != NULL) && isStreamActive(std::get<0>(*sIter), mActiveStreams) &&
-            (!(std::get<0>(*sIter)->isStopped()))) {
+        if ((std::get<0>(*sIter) != NULL) && isStreamActive(std::get<0>(*sIter), mActiveStreams)) {
             status = (std::get<0>(*sIter))->disconnectStreamDevice_l(std::get<0>(*sIter), (pal_device_id_t)std::get<1>(*sIter));
             if (status) {
                 PAL_ERR(LOG_TAG, "failed to disconnect stream %pK from device %d",
@@ -6270,8 +6277,7 @@ int32_t ResourceManager::streamDevConnect_l(std::vector <std::tuple<Stream *, st
     PAL_DBG(LOG_TAG, "Enter");
     /* connect active list from the current devices they are attached to */
     for (sIter = streamDevConnectList.begin(); sIter != streamDevConnectList.end(); sIter++) {
-        if ((std::get<0>(*sIter) != NULL) && isStreamActive(std::get<0>(*sIter), mActiveStreams) &&
-            (!(std::get<0>(*sIter)->isStopped()))) {
+        if ((std::get<0>(*sIter) != NULL) && isStreamActive(std::get<0>(*sIter), mActiveStreams)) {
             status = std::get<0>(*sIter)->connectStreamDevice_l(std::get<0>(*sIter), std::get<1>(*sIter));
             if (status) {
                 PAL_ERR(LOG_TAG,"failed to connect stream %pK from device %d",
@@ -7325,13 +7331,11 @@ int32_t ResourceManager::a2dpResume()
     for (sIter = activeStreams.begin(); sIter != activeStreams.end(); sIter++) {
         if (std::find((*sIter)->suspendedDevIds.begin(), (*sIter)->suspendedDevIds.end(),
                     PAL_DEVICE_OUT_BLUETOOTH_A2DP) != (*sIter)->suspendedDevIds.end()) {
-            if (!(*sIter)->isStopped()) {
-                restoredStreams.push_back((*sIter));
-                if ((*sIter)->suspendedDevIds.size() == 1 /* none combo */) {
-                    streamDevDisconnect.push_back({(*sIter), activeDattr.id});
-                }
-                streamDevConnect.push_back({(*sIter), &a2dpDattr});
-           }
+            restoredStreams.push_back((*sIter));
+            if ((*sIter)->suspendedDevIds.size() == 1 /* none combo */) {
+                streamDevDisconnect.push_back({(*sIter), activeDattr.id});
+            }
+            streamDevConnect.push_back({(*sIter), &a2dpDattr});
         }
     }
 
@@ -7339,10 +7343,8 @@ int32_t ResourceManager::a2dpResume()
     for (sIter = orphanStreams.begin(); sIter != orphanStreams.end(); sIter++) {
         if (std::find((*sIter)->suspendedDevIds.begin(), (*sIter)->suspendedDevIds.end(),
                     PAL_DEVICE_OUT_BLUETOOTH_A2DP) != (*sIter)->suspendedDevIds.end()) {
-            if (!(*sIter)->isStopped()) {
-                restoredStreams.push_back((*sIter));
-                streamDevConnect.push_back({(*sIter), &a2dpDattr});
-            }
+            restoredStreams.push_back((*sIter));
+            streamDevConnect.push_back({(*sIter), &a2dpDattr});
         }
     }
 
@@ -7350,17 +7352,16 @@ int32_t ResourceManager::a2dpResume()
     for (sIter = retryStreams.begin(); sIter != retryStreams.end(); sIter++) {
         if (std::find((*sIter)->suspendedDevIds.begin(), (*sIter)->suspendedDevIds.end(),
                     PAL_DEVICE_OUT_BLUETOOTH_A2DP) != (*sIter)->suspendedDevIds.end()) {
-            if (!(*sIter)->isStopped()) {
-                std::vector<std::shared_ptr<Device>> devices;
-                (*sIter)->getAssociatedDevices(devices);
-                if (devices.size() > 0) {
-                    for (auto device: devices) {
-                        streamDevDisconnect.push_back({(*sIter), device->getSndDeviceId()});
-                    }
+            std::vector<std::shared_ptr<Device>> devices;
+            (*sIter)->getAssociatedDevices(devices);
+            if (devices.size() > 0) {
+                for (auto device: devices) {
+                    streamDevDisconnect.push_back({(*sIter), device->getSndDeviceId()});
                 }
-                restoredStreams.push_back((*sIter));
-                streamDevConnect.push_back({(*sIter), &a2dpDattr});
             }
+
+            restoredStreams.push_back((*sIter));
+            streamDevConnect.push_back({(*sIter), &a2dpDattr});
         }
     }
 
