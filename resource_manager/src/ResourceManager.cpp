@@ -2812,6 +2812,7 @@ int ResourceManager::initStreamUserCounter(Stream *s)
 {
     lockActiveStream();
     mActiveStreamUserCounter.insert(std::make_pair(s, 0));
+    s->initStreamSmph();
     unlockActiveStream();
     return 0;
 }
@@ -2824,7 +2825,9 @@ int ResourceManager::deinitStreamUserCounter(Stream *s)
     it = mActiveStreamUserCounter.find(s);
     if (it != mActiveStreamUserCounter.end()) {
         PAL_INFO(LOG_TAG, "stream %p is to be erased.", s);
+        s->waitStreamSmph();
         mActiveStreamUserCounter.erase(it);
+        s->deinitStreamSmph();
         unlockActiveStream();
         return 0;
     } else {
@@ -8054,7 +8057,8 @@ int ResourceManager::getParameter(uint32_t param_id, void *param_payload,
             for(sIter = mActiveStreams.begin(); sIter != mActiveStreams.end(); sIter++) {
                 match = (*sIter)->checkStreamMatch(pal_device_id, pal_stream_type);
                 if (match) {
-                    increaseStreamUserCounter(*sIter);
+                    if (increaseStreamUserCounter(*sIter) < 0)
+                        continue;
                     unlockActiveStream();
                     status = (*sIter)->getEffectParameters(param_payload);
                     lockActiveStream();
@@ -8842,7 +8846,8 @@ int ResourceManager::setParameter(uint32_t param_id, void *param_payload,
                     match = (*sIter)->checkStreamMatch(pal_device_id,
                                                        pal_stream_type);
                     if (match) {
-                        increaseStreamUserCounter(*sIter);
+                        if (increaseStreamUserCounter(*sIter) < 0)
+                            continue;
                         unlockActiveStream();
                         status = (*sIter)->setParameters(param_id, param_payload);
                         lockActiveStream();
