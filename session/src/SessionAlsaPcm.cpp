@@ -167,19 +167,19 @@ int SessionAlsaPcm::open(Stream * s)
             else if ((sAttr.type == PAL_STREAM_PCM_OFFLOAD) ||
                      (sAttr.type == PAL_STREAM_DEEP_BUFFER) ||
                      (sAttr.type == PAL_STREAM_LOW_LATENCY)) {
-                     // Register for SoftPause callback for
+                     // Register for Mixer Event callback for
                      // only playback related streams
                      status = rm->registerMixerEventCallback(pcmDevIds,
                          sessionCb, cbCookie, true);
-                     if (status != 0) {
+                     if (status == 0) {
+                         isMixerEventCbRegd = true;
+                     } else {
+                         // Not a fatal error
                          PAL_ERR(LOG_TAG, "Failed to register callback to rm");
                          // If registration fails for this then pop noise
                          // issue will come. It isn't fatal so not throwing error.
                          status = 0;
-                         isPauseRegistrationDone = false;
                      }
-                     else
-                         isPauseRegistrationDone = true;
             }
             break;
         case PAL_AUDIO_INPUT | PAL_AUDIO_OUTPUT:
@@ -415,9 +415,11 @@ int SessionAlsaPcm::setConfig(Stream * s, configType type, int tag)
     const char *setParamTagControl = "setParamTag";
     const char *stream = "PCM";
     const char *setCalibrationControl = "setCalibration";
+    const char *setBEControl = "control";
     struct mixer_ctl *ctl;
     std::ostringstream tagCntrlName;
     std::ostringstream calCntrlName;
+    std::ostringstream beCntrlName;
     pal_stream_attributes sAttr;
     int tag_config_size = 0;
     int cal_config_size = 0;
@@ -427,6 +429,33 @@ int SessionAlsaPcm::setConfig(Stream * s, configType type, int tag)
         PAL_ERR(LOG_TAG, "stream get attributes failed");
         return status;
     }
+
+    if (sAttr.type != PAL_STREAM_VOICE_CALL_RECORD &&
+        sAttr.type != PAL_STREAM_VOICE_CALL_MUSIC  &&
+        sAttr.type != PAL_STREAM_CONTEXT_PROXY) {
+        if ((sAttr.direction == PAL_AUDIO_OUTPUT && rxAifBackEnds.empty()) ||
+            (sAttr.direction == PAL_AUDIO_INPUT && txAifBackEnds.empty())) {
+            PAL_ERR(LOG_TAG, "No backend connected to this stream\n");
+            return -EINVAL;
+        }
+
+        if (PAL_STREAM_LOOPBACK == sAttr.type) {
+            if (pcmDevRxIds.size() > 0)
+                beCntrlName << stream << pcmDevRxIds.at(0) << " " << setBEControl;
+        } else {
+            if (pcmDevIds.size() > 0)
+                beCntrlName << stream << pcmDevIds.at(0) << " " << setBEControl;
+        }
+
+        ctl = mixer_get_ctl_by_name(mixer, beCntrlName.str().data());
+        if (!ctl) {
+            PAL_ERR(LOG_TAG, "Invalid mixer control: %s\n", beCntrlName.str().data());
+            return -ENOENT;
+        }
+        mixer_ctl_set_enum_by_string(ctl, (sAttr.direction == PAL_AUDIO_INPUT) ?
+                                     txAifBackEnds[0].second.data() : rxAifBackEnds[0].second.data());
+    }
+
     PAL_DBG(LOG_TAG, "Enter tag: %d", tag);
     switch (type) {
         case MODULE:
@@ -1159,7 +1188,7 @@ pcm_start:
                 }
             }
 
-            if (!status && isPauseRegistrationDone) {
+            if (!status && isMixerEventCbRegd && !isPauseRegistrationDone) {
                 // Stream supports Soft Pause and registration with RM is
                 // successful. So register for Soft pause callback from adsp.
                 payload_size = sizeof(struct agm_event_reg_cfg);
@@ -1177,12 +1206,14 @@ pcm_start:
                 status = SessionAlsaUtils::registerMixerEvent(mixer, pcmDevIds.at(0),
                             rxAifBackEnds[0].second.data(), TAG_PAUSE, (void *)&event_cfg,
                             payload_size);
-                if (status != 0) {
+                if (status == 0) {
+                    isPauseRegistrationDone = true;
+                } else {
+                    // Not a fatal error
                     PAL_ERR(LOG_TAG, "Register for Pause failed %d", status);
                     // If registration fails for this then pop issue will come.
                     // It isn't fatal so not throwing error.
                     status = 0;
-                    isPauseRegistrationDone = false;
                 }
             }
             break;
@@ -1325,11 +1356,22 @@ int SessionAlsaPcm::stop(Stream * s)
                 event_cfg.event_id = EVENT_ID_SOFT_PAUSE_PAUSE_COMPLETE;
                 event_cfg.event_config_payload_size = 0;
                 event_cfg.is_register = 0;
-                if (pcmDevIds.size() > 0)
-                    SessionAlsaUtils::registerMixerEvent(mixer, pcmDevIds.at(0),
-                            rxAifBackEnds[0].second.data(), TAG_PAUSE, (void *)&event_cfg,
-                            payload_size);
-                isPauseRegistrationDone = false;
+
+                if (!pcmDevIds.size()) {
+                    PAL_ERR(LOG_TAG, "frontendIDs are not available");
+                    status = -EINVAL;
+                    goto exit;
+                }
+                status = SessionAlsaUtils::registerMixerEvent(mixer, pcmDevIds.at(0),
+                        rxAifBackEnds[0].second.data(), TAG_PAUSE, (void *)&event_cfg,
+                        payload_size);
+                if (status == 0) {
+                    isPauseRegistrationDone = false;
+                } else {
+                    // Not a fatal error
+                    PAL_ERR(LOG_TAG, "Pause deregistration failed");
+                    status = 0;
+               }
             }
             break;
         case PAL_AUDIO_INPUT | PAL_AUDIO_OUTPUT:
@@ -1523,15 +1565,17 @@ int SessionAlsaPcm::close(Stream * s)
                 status = errno;
                 PAL_ERR(LOG_TAG, "pcm_close failed %d", status);
             }
-            // Deregister callback for Soft Pause
-            if (!status && isPauseRegistrationDone) {
+            // Deregister callback for Mixer Event
+            if (!status && isMixerEventCbRegd) {
                 status = rm->registerMixerEventCallback(pcmDevIds,
                     sessionCb, cbCookie, false);
-                if (status != 0) {
-                    PAL_DBG(LOG_TAG, "Failed to deregister callback to rm");
+                if (status == 0) {
+                    isMixerEventCbRegd = false;
+                } else {
+                    // Not a fatal error
+                    PAL_ERR(LOG_TAG, "Failed to deregister callback to rm");
                     status = 0;
                 }
-                isPauseRegistrationDone = false;
             }
             rm->freeFrontEndIds(pcmDevIds, sAttr, 0);
             pcm = NULL;
@@ -2494,7 +2538,11 @@ int SessionAlsaPcm::getParameters(Stream *s __unused, int tagId, uint32_t param_
 
 
 exit:
-    freeCustomPayload(&payloadData, &payloadSize);
+    if (payloadSize) {
+        delete [] payloadData;
+        payloadData = NULL;
+        payloadSize = 0;
+    }
     PAL_DBG(LOG_TAG, "Exit. status %d", status);
     return status;
 }
