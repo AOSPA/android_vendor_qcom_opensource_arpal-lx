@@ -4353,7 +4353,9 @@ void ResourceManager::handleConcurrentStreamSwitch(std::vector<pal_stream_type_t
 
 bool ResourceManager::checkAndUpdateDeferSwitchState(bool stream_active)
 {
-    if (isAnyVUIStreamBuffering()) {
+    std::shared_ptr<SoundTriggerPlatformInfo> st_info =
+         SoundTriggerPlatformInfo::GetInstance();
+    if (st_info && st_info->GetDeferSwitchSupport() && isAnyVUIStreamBuffering()) {
         if (stream_active)
             deferredSwitchState =
                 (deferredSwitchState == DEFER_NLPI_LPI_SWITCH) ? NO_DEFER :
@@ -6293,23 +6295,13 @@ int32_t ResourceManager::streamDevConnect_l(std::vector <std::tuple<Stream *, st
             if (status) {
                 PAL_ERR(LOG_TAG,"failed to connect stream %pK from device %d",
                         std::get<0>(*sIter), (std::get<1>(*sIter))->id);
-
-                /* If connectStreamDevice_l failed during SSR down state, allow all other active
-                 * streams to pass through connectStreamDevice_l() so that associated device will be
-                 * pushed to the streams. When SSR is up streams will be routed to device properly
-                 */
-                if (status == -ENETRESET) {
-                    continue;
-                } else {
-                    goto error;
-                }
             } else {
                 PAL_DBG(LOG_TAG,"connected stream %pK from device %d",
                         std::get<0>(*sIter), (std::get<1>(*sIter))->id);
             }
         }
     }
-error:
+
     PAL_DBG(LOG_TAG, "Exit status: %d", status);
     return status;
 }
