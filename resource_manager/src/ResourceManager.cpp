@@ -461,6 +461,7 @@ int ResourceManager::wake_lock_fd = -1;
 int ResourceManager::wake_unlock_fd = -1;
 uint32_t ResourceManager::wake_lock_cnt = 0;
 static int max_session_num;
+bool is_multiple_sample_rate_combo_supported = true;
 bool ResourceManager::isSpeakerProtectionEnabled = false;
 bool ResourceManager::isHandsetProtectionEnabled = false;
 bool ResourceManager::isChargeConcurrencyEnabled = false;
@@ -1196,6 +1197,13 @@ int ResourceManager::init_audio()
                     PAL_VERBOSE(LOG_TAG, "Found Codec sound card");
                     snd_card_found = true;
                     audio_hw_mixer = tmp_mixer;
+                    //for bengal target multiple same rate on combo device not supported
+                    if(strstr(snd_card_name, "bengal"))
+                    {   PAL_INFO(LOG_TAG, "%s: setting is_multiple_sample_rate_combo_supported false for bengal",__func__);
+                        is_multiple_sample_rate_combo_supported = false;
+                    } else {
+                        is_multiple_sample_rate_combo_supported = true;
+                    }
                     break;
                 } else {
                     if (snd_card_name) {
