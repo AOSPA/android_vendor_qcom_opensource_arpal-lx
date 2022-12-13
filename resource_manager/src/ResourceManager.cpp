@@ -6040,7 +6040,9 @@ void ResourceManager::getSharedBEActiveStreamDevs(std::vector <std::tuple<Stream
     if (isValidDevId(dev_id) && (dev_id != PAL_DEVICE_NONE))
         backEndName = listAllBackEndIds[dev_id].second;
     for (int i = PAL_DEVICE_OUT_MIN; i < PAL_DEVICE_IN_MAX; i++) {
-        if (backEndName == listAllBackEndIds[i].second) {
+        if (backEndName == listAllBackEndIds[i].second || (!is_multiple_sample_rate_combo_supported &&
+                ((dev_id == PAL_DEVICE_OUT_SPEAKER &&  listAllBackEndIds[i].first == PAL_DEVICE_OUT_WIRED_HEADSET) ||
+                (dev_id == PAL_DEVICE_OUT_WIRED_HEADSET &&  listAllBackEndIds[i].first  == PAL_DEVICE_OUT_SPEAKER)))){
             dev = Device::getObject((pal_device_id_t) i);
             if(dev) {
                 getActiveStream_l(activeStreams, dev);
