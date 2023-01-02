@@ -665,8 +665,8 @@ should always be in sync with it -->
                     </ec_ref>
                 </policies>
         </in_stream>
-	<in_stream>
-	    <name>PAL_STREAM_COMPRESSED</name>
+        <in_stream>
+            <name>PAL_STREAM_COMPRESSED</name>
                <policies>
                    <ec_ref>
                        <disabled_stream>PAL_STREAM_LOW_LATENCY</disabled_stream>
