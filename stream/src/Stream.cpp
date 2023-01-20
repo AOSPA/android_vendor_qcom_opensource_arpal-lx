@@ -152,11 +152,11 @@ Stream* Stream::create(struct pal_stream_attributes *sAttr, struct pal_device *d
         if(noOfDevices > 1 && (dAttr[i].id == PAL_DEVICE_OUT_SPEAKER ||
                                 dAttr[i].id == PAL_DEVICE_OUT_WIRED_HEADSET ||
                                 dAttr[i].id == PAL_DEVICE_OUT_WIRED_HEADPHONE)) {
-           PAL_DBG(LOG_TAG, "isComboHeadsetActive 1");
-           sAttr->isComboHeadsetActive = 1;
+           PAL_DBG(LOG_TAG, "isComboHeadsetActive true");
+           sAttr->isComboHeadsetActive = true;
         } else {
-           PAL_DBG(LOG_TAG, "isComboHeadsetActive 0");
-           sAttr->isComboHeadsetActive = 0;
+           PAL_DBG(LOG_TAG, "isComboHeadsetActive false");
+           sAttr->isComboHeadsetActive = false;
         }
 
         //TODO: shift this to rm or somewhere else where we can read the supported config from xml
@@ -1442,11 +1442,11 @@ int32_t Stream::switchDevice(Stream* streamHandle, uint32_t numDev, struct pal_d
         if(connectCount > 1 && (newDeviceId == PAL_DEVICE_OUT_SPEAKER ||
                                 newDeviceId == PAL_DEVICE_OUT_WIRED_HEADSET ||
                                 newDeviceId == PAL_DEVICE_OUT_WIRED_HEADPHONE)) {
-           PAL_DBG(LOG_TAG, "isComboHeadsetActive 1");
-           strAttr.isComboHeadsetActive = 1;
+           PAL_DBG(LOG_TAG, "isComboHeadsetActive true");
+           strAttr.isComboHeadsetActive = true;
         } else {
-           PAL_DBG(LOG_TAG, "isComboHeadsetActive 0");
-           strAttr.isComboHeadsetActive = 0;
+           PAL_DBG(LOG_TAG, "isComboHeadsetActive false");
+           strAttr.isComboHeadsetActive = false;
         }
         /* This can result in below situation:
          * 1) No matching SharedBEStreamDev (handled in else part).
