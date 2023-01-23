@@ -1196,6 +1196,13 @@ int ResourceManager::init_audio()
                     PAL_VERBOSE(LOG_TAG, "Found Codec sound card");
                     snd_card_found = true;
                     audio_hw_mixer = tmp_mixer;
+                    //for bengal target multiple same rate on combo device not supported
+                    if(strstr(snd_card_name, "bengal"))
+                    {   PAL_INFO(LOG_TAG, "%s: setting is_multiple_sample_rate_combo_supported false for bengal",__func__);
+                        is_multiple_sample_rate_combo_supported = false;
+                    } else {
+                        is_multiple_sample_rate_combo_supported = true;
+                    }
                     break;
                 } else {
                     if (snd_card_name) {
@@ -2961,7 +2968,7 @@ void ResourceManager::disableInternalECRefs(Stream *s)
             dev = associatedDevices[i];
             if (isExternalECSupported(dev)) {
                 rx_dev = clearInternalECRefCounts(str, dev);
-                if (rx_dev && str != s) {
+                if (rx_dev && !checkStreamMatch(str, s)) {
                     if (isDeviceSwitch)
                         status = str->setECRef_l(rx_dev, false);
                     else
@@ -2972,6 +2979,45 @@ void ResourceManager::disableInternalECRefs(Stream *s)
     }
 
     PAL_DBG(LOG_TAG, "Exit");
+}
+
+bool ResourceManager::checkStreamMatch(Stream *target, Stream *ref) {
+    int32_t status = 0;
+    bool is_match = false;
+    struct pal_stream_attributes target_attr;
+    struct pal_stream_attributes ref_attr;
+    StreamSoundTrigger *st_target = nullptr;
+    StreamSoundTrigger *st_ref = nullptr;
+
+    if (target == ref)
+        return true;
+
+    status = target->getStreamAttributes(&target_attr);
+    if (status != 0) {
+        PAL_ERR(LOG_TAG,"stream get attributes failed");
+        goto exit;
+    }
+
+    status = ref->getStreamAttributes(&ref_attr);
+    if (status != 0) {
+        PAL_ERR(LOG_TAG,"stream get attributes failed");
+        goto exit;
+    }
+
+    if (target_attr.type != PAL_STREAM_VOICE_UI ||
+        ref_attr.type != PAL_STREAM_VOICE_UI)
+        goto exit;
+
+    st_target = dynamic_cast<StreamSoundTrigger *>(target);
+    st_ref = dynamic_cast<StreamSoundTrigger *>(ref);
+
+    if (st_target->GetGSLEngine() == st_ref->GetGSLEngine()) {
+        PAL_DBG(LOG_TAG, "Voice UI stream match because same gsl engine used");
+        is_match = true;
+    }
+
+exit:
+    return is_match;
 }
 
 int ResourceManager::registerDevice_l(std::shared_ptr<Device> d, Stream *s)
@@ -3092,26 +3138,27 @@ int ResourceManager::registerDevice(std::shared_ptr<Device> d, Stream *s)
                 }
             }
         }
-    } else if (sAttr.direction == PAL_AUDIO_INPUT_OUTPUT &&
-        sAttr.type == PAL_STREAM_VOICE_CALL) {
+    } else if (sAttr.direction == PAL_AUDIO_INPUT_OUTPUT) {
         if (d->getSndDeviceId() < PAL_DEVICE_OUT_MAX) {
             PAL_DBG(LOG_TAG, "Enter enable EC Ref");
-            status = s->setECRef_l(d, true);
-            s->getAssociatedDevices(tx_devices);
-            if (status || tx_devices.empty()) {
-                if(status != -ENODEV) {
-                    PAL_ERR(LOG_TAG, "Failed to set EC Ref with status %d"
-                        "or tx_devices with size %zu",
-                        status, tx_devices.size());
+            if (sAttr.type == PAL_STREAM_VOICE_CALL) {
+                status = s->setECRef_l(d, true);
+                s->getAssociatedDevices(tx_devices);
+                if (status || tx_devices.empty()) {
+                    if(status != -ENODEV) {
+                        PAL_ERR(LOG_TAG, "Failed to set EC Ref with status %d"
+                            "or tx_devices with size %zu",
+                            status, tx_devices.size());
+                    } else {
+                        status = 0;
+                        PAL_VERBOSE(LOG_TAG, "Failed to enable EC Ref because of -ENODEV");
+                    }
                 } else {
-                    status = 0;
-                    PAL_VERBOSE(LOG_TAG, "Failed to enable EC Ref because of -ENODEV");
-                }
-            } else {
-                for(auto& tx_device: tx_devices) {
-                    if (tx_device->getSndDeviceId() > PAL_DEVICE_IN_MIN &&
-                       tx_device->getSndDeviceId() < PAL_DEVICE_IN_MAX) {
-                        updateECDeviceMap(d, tx_device, s, 1, false);
+                    for(auto& tx_device: tx_devices) {
+                        if (tx_device->getSndDeviceId() > PAL_DEVICE_IN_MIN &&
+                            tx_device->getSndDeviceId() < PAL_DEVICE_IN_MAX) {
+                            updateECDeviceMap(d, tx_device, s, 1, false);
+                        }
                     }
                 }
             }
@@ -10721,6 +10768,11 @@ int ResourceManager::updatePriorityAttr(pal_device_id_t dev_id,
         }
         getDeviceConfig(&tempDev, &sAttr);
         compareAndUpdateDevAttr(&tempDev, &devInfo, incomingDev, &highPrioDevInfo);
+        if(currentStrAttr->isComboHeadsetActive && !is_multiple_sample_rate_combo_supported)
+        {
+           PAL_DBG(LOG_TAG," update incomingDev ->config.sample_rate ");
+           incomingDev->config.sample_rate = 48000;
+        }
         /*incoming stream prio is greater than or equal to active streams*/
         if (devInfo.priority <= highPrioDevInfo.priority  ) {
             highPrioDevInfo = devInfo;

@@ -205,7 +205,9 @@ int32_t  StreamPCM::open()
     }
 
     if (currentState == STREAM_IDLE) {
+        rm->lockGraph();
         status = session->open(this);
+        rm->unlockGraph();
         if (0 != status) {
             PAL_ERR(LOG_TAG, "session open failed with status %d", status);
             goto exit;
@@ -1246,15 +1248,6 @@ int32_t StreamPCM::flush()
         PAL_ERR(LOG_TAG, "Already flushed, state %d", currentState);
         goto exit;
     }
-
-    mStreamMutex.unlock();
-    rm->lockActiveStream();
-    mStreamMutex.lock();
-    for (int i = 0; i < mDevices.size(); i++) {
-        if (rm->isDeviceActive_l(mDevices[i], this))
-            rm->deregisterDevice(mDevices[i], this);
-    }
-    rm->unlockActiveStream();
 
     status = session->flush();
 exit:

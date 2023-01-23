@@ -578,6 +578,8 @@ public:
     static bool mixerClosed;
     enum card_status_t cardState;
     bool ssrStarted = false;
+    //Variable to check if multiple sampe rate during combo device supported
+    bool is_multiple_sample_rate_combo_supported = true;
     /* Variable to store whether Speaker protection is enabled or not */
     static bool isSpeakerProtectionEnabled;
     static bool isHandsetProtectionEnabled;
@@ -802,6 +804,7 @@ public:
     bool isExternalECSupported(std::shared_ptr<Device> tx_dev);
     bool isExternalECRefEnabled(int rx_dev_id);
     void disableInternalECRefs(Stream *s);
+    bool checkStreamMatch(Stream *target, Stream *ref);
 
     static void endTag(void *userdata __unused, const XML_Char *tag_name);
     static void snd_reset_data_buf(struct xml_userdata *data);
