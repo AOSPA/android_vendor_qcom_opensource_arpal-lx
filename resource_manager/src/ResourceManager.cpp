@@ -479,6 +479,7 @@ bool ResourceManager::lpi_logging_ = false;
 bool ResourceManager::isUpdDedicatedBeEnabled = false;
 int ResourceManager::max_voice_vol = -1;     /* Variable to store max volume index for voice call */
 bool ResourceManager::isSignalHandlerEnabled = false;
+bool ResourceManager::a2dp_suspended = false;
 
 //TODO:Needs to define below APIs so that functionality won't break
 #ifdef FEATURE_IPQ_OPENWRT
@@ -4330,8 +4331,9 @@ void ResourceManager::GetConcurrencyInfo(pal_stream_type_t st_type,
             *conc_en = false;
         }
     } else if (dir == PAL_AUDIO_INPUT &&
-               (in_type == PAL_STREAM_LOW_LATENCY ||
-                in_type == PAL_STREAM_DEEP_BUFFER)) {
+               (in_type != PAL_STREAM_ACD &&
+                in_type != PAL_STREAM_SENSOR_PCM_DATA &&
+                in_type != PAL_STREAM_VOICE_UI)) {
         *tx_conc = true;
         if (!audio_capture_conc_enable) {
             PAL_DBG(LOG_TAG, "pause on audio capture concurrency");
@@ -5120,7 +5122,8 @@ void  ResourceManager::checkSpeakerConcurrency(struct pal_device *deviceattr,
          *added below code to avoid noise in spk while headset -> remove play on spk and
          *headset connect again very fast.
          */
-        if (!sAttr->isComboHeadsetActive && sharedBEStreamDev.size() > 0) {
+        if (!sAttr->isComboHeadsetActive && sharedBEStreamDev.size() > 0 &&
+            (sAttr->out_media_config.sample_rate % SAMPLINGRATE_44K == 0 )) {
            for (const auto &elem : sharedBEStreamDev) {
                 bool switchNeeded = false;
                 Stream *sharedStream = std::get<0>(elem);
@@ -5135,11 +5138,10 @@ void  ResourceManager::checkSpeakerConcurrency(struct pal_device *deviceattr,
          }
          getActiveStream_l(activeStreams, spkrDev);
          if (activeStreams.size() != 0) {
-             PAL_ERR(LOG_TAG," IF ");
              spkrDev->getDeviceAttributes(&spkrDattr);
               if ((deviceattr->config.sample_rate % SAMPLINGRATE_44K == 0) &&
                   (spkrDattr.config.sample_rate % SAMPLINGRATE_44K != 0)) {
-                 deviceattr->config.sample_rate = sAttr->out_media_config.sample_rate;
+                  deviceattr->config.sample_rate = sAttr->out_media_config.sample_rate;
                   deviceattr->config.bit_width =  sAttr->out_media_config.bit_width;
                   deviceattr->config.aud_fmt_id =  bitWidthToFormat.at(deviceattr->config.bit_width);
                   PAL_DBG(LOG_TAG, "headset is coming, update headset to sr: %d bw: %d ",
@@ -5157,12 +5159,6 @@ void  ResourceManager::checkSpeakerConcurrency(struct pal_device *deviceattr,
                 bool switchNeeded = false;
                 Stream *sharedStream = std::get<0>(elem);
                 std::shared_ptr<Device> curDev = nullptr;
-                PAL_ERR(LOG_TAG, "Loop ..................");
-
-                if (switchNeeded){
-                    streamsToSwitch.push_back(sharedStream);
-                }
-
                 curDevAttr->id = (pal_device_id_t)std::get<1>(elem);
                 curDev = Device::getInstance(curDevAttr, rm);
                 if (!curDev) {
@@ -5170,30 +5166,32 @@ void  ResourceManager::checkSpeakerConcurrency(struct pal_device *deviceattr,
                     continue;
                 }
                 curDev->getDeviceAttributes(curDevAttr);
-                if(!isDeviceAvailable(PAL_DEVICE_OUT_WIRED_HEADSET) && !isDeviceAvailable(PAL_DEVICE_OUT_WIRED_HEADPHONE)) {
-                      PAL_DBG(LOG_TAG, "WHS Device not available, disconnect stream");
-                      streamDevDisconnect.push_back(elem);
-                      int status = 0;
-                      status = streamDevDisconnect_l(streamDevDisconnect);
-                      if (status) {
-                        PAL_ERR(LOG_TAG, "disconnect failed");
-                      }
-                } else if ((curDevAttr->config.sample_rate % SAMPLINGRATE_44K == 0) &&
+                if ((curDevAttr->config.sample_rate % SAMPLINGRATE_44K == 0) &&
                     (sAttr->out_media_config.sample_rate % SAMPLINGRATE_44K != 0)) {
-
-                    curDevAttr->config.sample_rate = sAttr->out_media_config.sample_rate;
-                    curDevAttr->config.bit_width = sAttr->out_media_config.bit_width;
-                    curDevAttr->config.aud_fmt_id = bitWidthToFormat.at(deviceattr->config.bit_width);
                     switchNeeded = true;
-                    streamsToSwitch.push_back(sharedStream);
-                    PAL_DBG(LOG_TAG, "Speaker is coming, update headset to sr: %d bw: %d ",
-                        curDevAttr->config.sample_rate, curDevAttr->config.bit_width);
+                    if(!isDeviceAvailable(PAL_DEVICE_OUT_WIRED_HEADSET) && !isDeviceAvailable(PAL_DEVICE_OUT_WIRED_HEADPHONE)) {
+                        PAL_DBG(LOG_TAG, "WHS Device not available, disconnect stream");
+                        streamDevDisconnect.push_back(elem);
+                        int status = 0;
+                        status = streamDevDisconnect_l(streamDevDisconnect);
+                        if (status) {
+                           PAL_ERR(LOG_TAG, "disconnect failed");
+                        }
+                        switchNeeded = false;
+                    }
+                    if(switchNeeded) {
+                       curDevAttr->config.sample_rate = sAttr->out_media_config.sample_rate;
+                       curDevAttr->config.bit_width = sAttr->out_media_config.bit_width;
+                       curDevAttr->config.aud_fmt_id = bitWidthToFormat.at(deviceattr->config.bit_width);
+                       streamsToSwitch.push_back(sharedStream);
+                       PAL_DBG(LOG_TAG, "Speaker is coming, update headset to sr: %d bw: %d ",
+                              curDevAttr->config.sample_rate, curDevAttr->config.bit_width);
+                   }
                 }
             }
         }
     }
 }
-
 
 /* check if headset sample rate needs to be updated for haptics concurrency */
 void ResourceManager::checkHapticsConcurrency(struct pal_device *deviceattr,
@@ -7565,6 +7563,7 @@ int32_t ResourceManager::a2dpResume()
      * That is to connect a2dp and do not disconnect from current associated device.
      */
     for (sIter = activeStreams.begin(); sIter != activeStreams.end(); sIter++) {
+        (*sIter)->lockStreamMutex();
         if (std::find((*sIter)->suspendedDevIds.begin(), (*sIter)->suspendedDevIds.end(),
                     PAL_DEVICE_OUT_BLUETOOTH_A2DP) != (*sIter)->suspendedDevIds.end()) {
             restoredStreams.push_back((*sIter));
@@ -7573,15 +7572,18 @@ int32_t ResourceManager::a2dpResume()
             }
             streamDevConnect.push_back({(*sIter), &a2dpDattr});
         }
+        (*sIter)->unlockStreamMutex();
     }
 
     // retry all orphan streams which failed to restore previously.
     for (sIter = orphanStreams.begin(); sIter != orphanStreams.end(); sIter++) {
+        (*sIter)->lockStreamMutex();
         if (std::find((*sIter)->suspendedDevIds.begin(), (*sIter)->suspendedDevIds.end(),
                     PAL_DEVICE_OUT_BLUETOOTH_A2DP) != (*sIter)->suspendedDevIds.end()) {
             restoredStreams.push_back((*sIter));
             streamDevConnect.push_back({(*sIter), &a2dpDattr});
         }
+        (*sIter)->unlockStreamMutex();
     }
 
     // retry all streams which failed to switch to desired device previously.
@@ -8114,6 +8116,7 @@ int ResourceManager::setParameter(uint32_t param_id, void *param_payload,
                 (pal_param_device_connection_t *)param_payload;
             std::shared_ptr<Device> dev = nullptr;
             struct pal_device dattr;
+            pal_param_bta2dp_t param_bt_a2dp;
 
             PAL_INFO(LOG_TAG, "Device %d connected = %d",
                         device_connection->id,
@@ -8124,8 +8127,23 @@ int ResourceManager::setParameter(uint32_t param_id, void *param_payload,
                     device_connection->id == PAL_DEVICE_IN_BLUETOOTH_A2DP)) {
                     dattr.id = device_connection->id;
                     dev = Device::getInstance(&dattr, rm);
-                    if (dev)
+                    if (dev) {
                         status = dev->setDeviceParameter(param_id, param_payload);
+                        /* Set a2dp_suspended true if it is set to true before device
+                         * connection, and reset it at device device disconnection
+                         */
+                        if (!status && a2dp_suspended &&
+                            device_connection->id == PAL_DEVICE_OUT_BLUETOOTH_A2DP) {
+                           if (device_connection->connection_state) {
+                               param_bt_a2dp.a2dp_suspended = true;
+                               PAL_DBG(LOG_TAG, "Applying cached a2dp_suspended true param");
+                               status = dev->setDeviceParameter(PAL_PARAM_ID_BT_A2DP_SUSPENDED,
+                                                                &param_bt_a2dp);
+                           } else {
+                               a2dp_suspended = false;
+                           }
+                        }
+                    }
                 } else {
                     status = SwitchSoundTriggerDevices(
                         device_connection->connection_state,
@@ -8438,6 +8456,11 @@ int ResourceManager::setParameter(uint32_t param_id, void *param_payload,
             pal_param_bta2dp_t *current_param_bt_a2dp = nullptr;
             pal_param_bta2dp_t *param_bt_a2dp = nullptr;
 
+            param_bt_a2dp = (pal_param_bta2dp_t*)param_payload;
+
+            // Cache a2dpSuspended state for a2dp devices
+            a2dp_suspended = param_bt_a2dp->a2dp_suspended;
+
             a2dp_dattr.id = PAL_DEVICE_OUT_BLUETOOTH_A2DP;
             if (!isDeviceAvailable(a2dp_dattr.id)) {
                 PAL_ERR(LOG_TAG, "device %d is inactive, set param %d failed",
@@ -8446,8 +8469,7 @@ int ResourceManager::setParameter(uint32_t param_id, void *param_payload,
                 goto exit;
             }
 
-            param_bt_a2dp = (pal_param_bta2dp_t *)param_payload;
-            a2dp_dev = Device::getInstance(&a2dp_dattr , rm);
+            a2dp_dev = Device::getInstance(&a2dp_dattr, rm);
             if (!a2dp_dev) {
                 PAL_ERR(LOG_TAG, "Failed to get A2DP instance");
                 status = -ENODEV;
