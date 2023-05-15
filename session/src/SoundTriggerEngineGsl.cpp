@@ -48,6 +48,8 @@
 #define PAL_DBG(LOG_TAG,...)  PAL_INFO(LOG_TAG,__VA_ARGS__)
 #endif
 
+#define MAX_MMAP_POSITION_QUERY_RETRY_CNT 5
+
 ST_DBG_DECLARE(static int dsp_output_cnt = 0);
 
 std::map<st_module_type_t,std::shared_ptr<SoundTriggerEngineGsl>>
@@ -95,18 +97,16 @@ void SoundTriggerEngineGsl::EventProcessingThread(
                 if (gsl_engine->capture_requested_) {
                     status = gsl_engine->StartBuffering(s);
                     if (status < 0) {
-                        lck.unlock();
-                        gsl_engine->RestartRecognition(s);
-                        lck.lock();
+                        gsl_engine->RestartRecognition_l(s);
                     }
                 } else {
                     status = gsl_engine->UpdateSessionPayload(ENGINE_RESET);
                     gsl_engine->CheckAndSetDetectionConfLevels(s);
                     lck.unlock();
                     status = s->SetEngineDetectionState(GMM_DETECTED);
-                    if (status < 0)
-                        gsl_engine->RestartRecognition(s);
                     lck.lock();
+                    if (status < 0)
+                        gsl_engine->RestartRecognition_l(s);
                 }
             }
         } else {
@@ -123,14 +123,13 @@ void SoundTriggerEngineGsl::EventProcessingThread(
                     if (gsl_engine->capture_requested_) {
                         status = gsl_engine->StartBuffering(s);
                         if (status < 0) {
-                            lck.unlock();
-                            gsl_engine->RestartRecognition(s);
-                            lck.lock();
+                            gsl_engine->RestartRecognition_l(s);
                         }
                     } else {
                         status = gsl_engine->UpdateSessionPayload(ENGINE_RESET);
                         lck.unlock();
                         status = s->SetEngineDetectionState(GMM_DETECTED);
+                        lck.lock();
                         /*
                          * In Dual VA, when the detections are ignored for a
                          * stopped stream, SPF session will be in same state.
@@ -141,8 +140,7 @@ void SoundTriggerEngineGsl::EventProcessingThread(
                          * for stopped model, remove this change.
                          */
                         if (status < 0)
-                            gsl_engine->RestartRecognition(s);
-                        lck.lock();
+                            gsl_engine->RestartRecognition_l(s);
                     }
                 }
             }
@@ -218,10 +216,16 @@ int32_t SoundTriggerEngineGsl::StartBuffering(Stream *s) {
     FILE *dsp_output_fd = nullptr;
     ChronoSteadyClock_t kw_transfer_begin;
     ChronoSteadyClock_t kw_transfer_end;
+    size_t retry_cnt = 0;
 
     PAL_DBG(LOG_TAG, "Enter");
     UpdateState(ENG_BUFFERING);
     s->getBufInfo(&input_buf_size, &input_buf_num, nullptr, nullptr);
+    sleep_ms = (input_buf_size * input_buf_num) *
+        BITS_PER_BYTE * MS_PER_SEC /
+        (sm_cfg_->GetSampleRate() * sm_cfg_->GetBitWidth() *
+        sm_cfg_->GetOutChannels());
+
     std::memset(&buf, 0, sizeof(struct pal_buffer));
     buf.size = input_buf_size * input_buf_num;
     buf.buffer = (uint8_t *)calloc(1, buf.size);
@@ -267,14 +271,6 @@ int32_t SoundTriggerEngineGsl::StartBuffering(Stream *s) {
         // read data from session
         ATRACE_ASYNC_BEGIN("stEngine: lab read", (int32_t)module_type_);
         if (mmap_buffer_size_ != 0) {
-            if (total_read_size >= ftrt_size) {
-                sleep_ms = (input_buf_size * input_buf_num) *
-                    BITS_PER_BYTE * MS_PER_SEC /
-                    (sm_cfg_->GetSampleRate() * sm_cfg_->GetBitWidth() *
-                    sm_cfg_->GetOutChannels());
-                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
-            }
-
             /*
              * GetMmapPosition returns total frames written for this session
              * which will be accumulated during back to back detections, so
@@ -293,8 +289,14 @@ int32_t SoundTriggerEngineGsl::StartBuffering(Stream *s) {
                 }
                 if (bytes_written > total_read_size) {
                     size_to_read = bytes_written - total_read_size;
+                    retry_cnt = 0;
                 } else {
-                    // TODO: add timeout check & handling
+                    retry_cnt++;
+                    if (retry_cnt > MAX_MMAP_POSITION_QUERY_RETRY_CNT) {
+                        status = -EIO;
+                        goto exit;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
                     continue;
                 }
                 if (size_to_read > (2 * mmap_buffer_size_) - read_offset) {
@@ -381,59 +383,62 @@ int32_t SoundTriggerEngineGsl::StartBuffering(Stream *s) {
 
         // notify client until ftrt data read
         if (!event_notified && total_read_size >= ftrt_size) {
-            kw_transfer_end = std::chrono::steady_clock::now();
-            ATRACE_ASYNC_END("stEngine: read FTRT data", (int32_t)module_type_);
-            kw_transfer_latency_ = std::chrono::duration_cast<std::chrono::milliseconds>(
-                kw_transfer_end - kw_transfer_begin).count();
-            PAL_INFO(LOG_TAG, "FTRT data read done! total_read_size %zu, ftrt_size %zu, read latency %llums",
-                    total_read_size, ftrt_size, (long long)kw_transfer_latency_);
+            if (!event_notified) {
+                kw_transfer_end = std::chrono::steady_clock::now();
+                ATRACE_ASYNC_END("stEngine: read FTRT data", (int32_t)module_type_);
+                kw_transfer_latency_ = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    kw_transfer_end - kw_transfer_begin).count();
+                PAL_INFO(LOG_TAG, "FTRT data read done! total_read_size %zu, ftrt_size %zu, read latency %llums",
+                        total_read_size, ftrt_size, (long long)kw_transfer_latency_);
 
-            if (!IS_MODULE_TYPE_PDK(module_type_)) {
-                StreamSoundTrigger *s = dynamic_cast<StreamSoundTrigger *>
-                                                     (GetDetectedStream());
-                if (s) {
-                    CheckAndSetDetectionConfLevels(s);
-                    mutex_.unlock();
-                    status = s->SetEngineDetectionState(GMM_DETECTED);
-                    if (status < 0)
-                        RestartRecognition(s);
-                    mutex_.lock();
-                }
-            } else {
-                for (int i = 0;
-                    i < detection_event_info_multi_model_.num_detected_models;
-                    i++) {
+                if (!IS_MODULE_TYPE_PDK(module_type_)) {
                     StreamSoundTrigger *s = dynamic_cast<StreamSoundTrigger *>
-                                            (GetDetectedStream(
-                                            detection_event_info_multi_model_.
-                                            detected_model_stats[i].
-                                            detected_model_id));
-
+                                                        (GetDetectedStream());
                     if (s) {
+                        CheckAndSetDetectionConfLevels(s);
                         mutex_.unlock();
                         status = s->SetEngineDetectionState(GMM_DETECTED);
-                        /*
-                         * In Dual VA, when the detections are ignored for a
-                         * stopped stream, SPF session will be in same state.
-                         * If engine is not reset and recognition is not restarted,
-                         * SPF modules are not reset properly and further detections
-                         * don't work. So, restart recognition to handle this.
-                         * TODO: When PDK library adds support to ignore detection
-                         * for stopped model, remove this change.
-                         */
-                        if (status < 0)
-                            RestartRecognition(s);
                         mutex_.lock();
+                        if (status < 0)
+                            RestartRecognition_l(s);
+                    }
+                } else {
+                    for (int i = 0;
+                        i < detection_event_info_multi_model_.num_detected_models;
+                        i++) {
+                        StreamSoundTrigger *s = dynamic_cast<StreamSoundTrigger *>
+                                                (GetDetectedStream(
+                                                detection_event_info_multi_model_.
+                                                detected_model_stats[i].
+                                                detected_model_id));
+
+                        if (s) {
+                            mutex_.unlock();
+                            status = s->SetEngineDetectionState(GMM_DETECTED);
+                            /*
+                            * In Dual VA, when the detections are ignored for a
+                            * stopped stream, SPF session will be in same state.
+                            * If engine is not reset and recognition is not restarted,
+                            * SPF modules are not reset properly and further detections
+                            * don't work. So, restart recognition to handle this.
+                            * TODO: When PDK library adds support to ignore detection
+                            * for stopped model, remove this change.
+                            */
+                            if (status < 0)
+                                RestartRecognition(s);
+                            mutex_.lock();
+                        }
                     }
                 }
+                if (status) {
+                    PAL_ERR(LOG_TAG,
+                        "Failed to set engine detection state to stream, status %d",
+                        status);
+                    break;
+                }
+                event_notified = true;
             }
-            if (status) {
-                PAL_ERR(LOG_TAG,
-                    "Failed to set engine detection state to stream, status %d",
-                    status);
-                break;
-            }
-            event_notified = true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
         }
     }
 
@@ -2032,11 +2037,22 @@ int32_t SoundTriggerEngineGsl::StartRecognition(Stream *s) {
 
 int32_t SoundTriggerEngineGsl::RestartRecognition(Stream *s) {
     int32_t status = 0;
+
+    PAL_VERBOSE(LOG_TAG, "Enter");
+    exit_buffering_ = true;
+    std::lock_guard<std::mutex> lck(mutex_);
+
+    status = RestartRecognition_l(s);
+
+    PAL_VERBOSE(LOG_TAG, "Exit, status = %d", status);
+    return status;
+}
+
+int32_t SoundTriggerEngineGsl::RestartRecognition_l(Stream *s) {
+    int32_t status = 0;
     struct pal_mmap_position mmap_pos;
 
     PAL_DBG(LOG_TAG, "Enter");
-    exit_buffering_ = true;
-    std::lock_guard<std::mutex> lck(mutex_);
 
     /* If engine is not active, do not restart recognition again */
     if (!IsEngineActive()) {
