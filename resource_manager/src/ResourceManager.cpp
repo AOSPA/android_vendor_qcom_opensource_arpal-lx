@@ -1193,6 +1193,8 @@ int ResourceManager::init_audio()
                     strstr(snd_card_name, "ravelin") ||
                     strstr(snd_card_name, "diwali") ||
                     strstr(snd_card_name, "bengal") ||
+                    strstr(snd_card_name, "holi") ||
+                    strstr(snd_card_name, "blair") ||
                     strstr(snd_card_name, "monaco") ||
                     strstr(snd_card_name, "parrot")) {
                     PAL_VERBOSE(LOG_TAG, "Found Codec sound card");
@@ -3027,10 +3029,16 @@ exit:
 
 int ResourceManager::registerDevice_l(std::shared_ptr<Device> d, Stream *s)
 {
+    int ret = 0;
     PAL_DBG(LOG_TAG, "Enter.");
-    active_devices.push_back(std::make_pair(d, s));
+    auto iter = std::find(active_devices.begin(),
+        active_devices.end(), std::make_pair(d, s));
+    if (iter == active_devices.end())
+        active_devices.push_back(std::make_pair(d, s));
+    else
+        ret = -EINVAL;
     PAL_DBG(LOG_TAG, "Exit.");
-    return 0;
+    return ret;
 }
 
 // TODO: need to refine call flow to reduce redundant operation
@@ -3054,7 +3062,11 @@ int ResourceManager::registerDevice(std::shared_ptr<Device> d, Stream *s)
     }
 
     mResourceManagerMutex.lock();
-    registerDevice_l(d, s);
+    if (registerDevice_l(d, s)) {
+        PAL_DBG(LOG_TAG, "device %d is already registered for stream %pK",
+            d->getSndDeviceId(), s);
+        goto unlock;
+    }
     if (sAttr.direction == PAL_AUDIO_INPUT &&
         sAttr.type != PAL_STREAM_PROXY &&
         sAttr.type != PAL_STREAM_ULTRA_LOW_LATENCY &&
@@ -3252,7 +3264,11 @@ int ResourceManager::deregisterDevice(std::shared_ptr<Device> d, Stream *s)
     }
 
     mResourceManagerMutex.lock();
-    deregisterDevice_l(d, s);
+    if (deregisterDevice_l(d, s)) {
+        PAL_DBG(LOG_TAG, "Device %d not found for stream %pK, skip EC handling",
+            d->getSndDeviceId(), s);
+        goto unlock;
+    }
     if (sAttr.direction == PAL_AUDIO_INPUT) {
         updateECDeviceMap(nullptr, d, s, 0, true);
         mResourceManagerMutex.unlock();
@@ -5126,7 +5142,7 @@ void  ResourceManager::checkSpeakerConcurrency(struct pal_device *deviceattr,
          *added below code to avoid noise in spk while headset -> remove play on spk and
          *headset connect again very fast.
          */
-        if (!sAttr->isComboHeadsetActive && sharedBEStreamDev.size() > 0 &&
+        if (!sAttr->isComboHeadsetActive && sharedBEStreamDev.size() > 1 &&
             (sAttr->out_media_config.sample_rate % SAMPLINGRATE_44K == 0 )) {
            for (const auto &elem : sharedBEStreamDev) {
                 bool switchNeeded = false;
@@ -5142,16 +5158,40 @@ void  ResourceManager::checkSpeakerConcurrency(struct pal_device *deviceattr,
          }
          getActiveStream_l(activeStreams, spkrDev);
          if (activeStreams.size() != 0) {
-             spkrDev->getDeviceAttributes(&spkrDattr);
+              spkrDev->getDeviceAttributes(&spkrDattr);
               if ((deviceattr->config.sample_rate % SAMPLINGRATE_44K == 0) &&
                   (spkrDattr.config.sample_rate % SAMPLINGRATE_44K != 0)) {
-                  deviceattr->config.sample_rate = sAttr->out_media_config.sample_rate;
-                  deviceattr->config.bit_width =  sAttr->out_media_config.bit_width;
-                  deviceattr->config.aud_fmt_id =  bitWidthToFormat.at(deviceattr->config.bit_width);
+                  pal_stream_type_t activeStrtype;
+                  for (auto& str: activeStreams) {
+                       str->getStreamType(&activeStrtype);
+                  }
+                  PAL_DBG(LOG_TAG,"type:%d sAttr->type:%d",activeStrtype,sAttr->type);
+                  //if active stream type is same as incoming stream type, use incoming stream SR for WHS
+                  // else use speaker active sample rate for headset device
+                  if (activeStrtype == sAttr->type) {
+                      deviceattr->config.sample_rate = sAttr->out_media_config.sample_rate;
+                      deviceattr->config.bit_width =  sAttr->out_media_config.bit_width;
+                      deviceattr->config.aud_fmt_id =  bitWidthToFormat.at(deviceattr->config.bit_width);
+                  } else {
+                     deviceattr->config.sample_rate = spkrDattr.config.sample_rate;
+                     deviceattr->config.bit_width =  spkrDattr.config.bit_width;
+                     deviceattr->config.aud_fmt_id =  bitWidthToFormat.at(deviceattr->config.bit_width);
+                  }
                   PAL_DBG(LOG_TAG, "headset is coming, update headset to sr: %d bw: %d ",
                      deviceattr->config.sample_rate, deviceattr->config.bit_width);
               }
-        }
+         } else {
+              //In some corner case activeStreams on spk is 0 but combo is active so force
+              //config samplerate as 48k
+              if( sAttr->isComboHeadsetActive && activeStreams.size() == 0){
+                 deviceattr->config.sample_rate = DEFAULT_SAMPLE_RATE;
+                 deviceattr->config.bit_width =  DEFAULT_BIT_WIDTH;
+                 deviceattr->config.aud_fmt_id =  bitWidthToFormat.at(deviceattr->config.bit_width);
+                 PAL_DBG(LOG_TAG, "headset is coming, combo is active  update headset to sr: %d bw: %d ",
+                     deviceattr->config.sample_rate, deviceattr->config.bit_width);
+              }
+
+         }
     } else if (deviceattr->id == PAL_DEVICE_OUT_SPEAKER) {
         // if Speaker is coming, update headset sample rate if needed for all streams active on Headset
         getSharedBEActiveStreamDevs(sharedBEStreamDev, PAL_DEVICE_OUT_WIRED_HEADSET);
@@ -5170,8 +5210,10 @@ void  ResourceManager::checkSpeakerConcurrency(struct pal_device *deviceattr,
                     continue;
                 }
                 curDev->getDeviceAttributes(curDevAttr);
-                if ((curDevAttr->config.sample_rate % SAMPLINGRATE_44K == 0) &&
-                    (sAttr->out_media_config.sample_rate % SAMPLINGRATE_44K != 0)) {
+                if (((curDevAttr->config.sample_rate % SAMPLINGRATE_44K == 0) &&
+                    (sAttr->out_media_config.sample_rate % SAMPLINGRATE_44K != 0)) ||
+                    ((!sAttr->isComboHeadsetActive && sharedBEStreamDev.size() > 0 &&
+                     (sAttr->out_media_config.sample_rate % SAMPLINGRATE_44K == 0 )))) {
                     switchNeeded = true;
                     if(!isDeviceAvailable(PAL_DEVICE_OUT_WIRED_HEADSET) && !isDeviceAvailable(PAL_DEVICE_OUT_WIRED_HEADPHONE)) {
                         PAL_DBG(LOG_TAG, "WHS Device not available, disconnect stream");
@@ -10960,7 +11002,7 @@ int ResourceManager::updatePriorityAttr(pal_device_id_t dev_id,
         compareAndUpdateDevAttr(&tempDev, &devInfo, incomingDev, &highPrioDevInfo);
         if (!is_multiple_sample_rate_combo_supported) {
         /* handle headphone and speaker concurrency */
-            checkSpeakerConcurrency(incomingDev, &sAttr, streamsToSwitch, &tempDev);
+            checkSpeakerConcurrency(incomingDev, currentStrAttr, streamsToSwitch, &tempDev);
 
         }
 
