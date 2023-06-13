@@ -1194,6 +1194,8 @@ int ResourceManager::init_audio()
                     strstr(snd_card_name, "ravelin") ||
                     strstr(snd_card_name, "diwali") ||
                     strstr(snd_card_name, "bengal") ||
+                    strstr(snd_card_name, "holi") ||
+                    strstr(snd_card_name, "blair") ||
                     strstr(snd_card_name, "monaco") ||
                     strstr(snd_card_name, "parrot")) {
                     PAL_VERBOSE(LOG_TAG, "Found Codec sound card");
@@ -3028,10 +3030,16 @@ exit:
 
 int ResourceManager::registerDevice_l(std::shared_ptr<Device> d, Stream *s)
 {
+    int ret = 0;
     PAL_DBG(LOG_TAG, "Enter.");
-    active_devices.push_back(std::make_pair(d, s));
+    auto iter = std::find(active_devices.begin(),
+        active_devices.end(), std::make_pair(d, s));
+    if (iter == active_devices.end())
+        active_devices.push_back(std::make_pair(d, s));
+    else
+        ret = -EINVAL;
     PAL_DBG(LOG_TAG, "Exit.");
-    return 0;
+    return ret;
 }
 
 // TODO: need to refine call flow to reduce redundant operation
@@ -3055,7 +3063,11 @@ int ResourceManager::registerDevice(std::shared_ptr<Device> d, Stream *s)
     }
 
     mResourceManagerMutex.lock();
-    registerDevice_l(d, s);
+    if (registerDevice_l(d, s)) {
+        PAL_DBG(LOG_TAG, "device %d is already registered for stream %pK",
+            d->getSndDeviceId(), s);
+        goto unlock;
+    }
     if (sAttr.direction == PAL_AUDIO_INPUT &&
         sAttr.type != PAL_STREAM_PROXY &&
         sAttr.type != PAL_STREAM_ULTRA_LOW_LATENCY &&
@@ -3253,7 +3265,11 @@ int ResourceManager::deregisterDevice(std::shared_ptr<Device> d, Stream *s)
     }
 
     mResourceManagerMutex.lock();
-    deregisterDevice_l(d, s);
+    if (deregisterDevice_l(d, s)) {
+        PAL_DBG(LOG_TAG, "Device %d not found for stream %pK, skip EC handling",
+            d->getSndDeviceId(), s);
+        goto unlock;
+    }
     if (sAttr.direction == PAL_AUDIO_INPUT) {
         updateECDeviceMap(nullptr, d, s, 0, true);
         mResourceManagerMutex.unlock();
