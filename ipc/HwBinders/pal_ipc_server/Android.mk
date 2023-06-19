@@ -5,6 +5,11 @@ LOCAL_MODULE := vendor.qti.hardware.pal@1.0-impl
 LOCAL_MODULE_OWNER := qti
 LOCAL_VENDOR_MODULE := true
 LOCAL_CFLAGS += -v
+LOCAL_CFLAGS += -Wno-unused-parameter
+LOCAL_CFLAGS += -Wno-unused-variable
+LOCAL_CFLAGS += -Wno-format
+LOCAL_CFLAGS += -Wno-missing-field-initializers
+LOCAL_CFLAGS += -Wno-unused-function
 LOCAL_SRC_FILES := \
     src/pal_server_wrapper.cpp
 
