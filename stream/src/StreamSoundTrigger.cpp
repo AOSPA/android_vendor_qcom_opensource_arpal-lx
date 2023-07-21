@@ -324,6 +324,11 @@ int32_t StreamSoundTrigger::start() {
 
     PAL_DBG(LOG_TAG, "Enter, stream direction %d", mStreamAttr->direction);
 
+    /*
+     * Guard with mActiveStreamMutex to avoid concurrent
+     * RX stream getting released during EC enable
+     */
+    rm->lockActiveStream();
     std::lock_guard<std::mutex> lck(mStreamMutex);
     // cache current state after mutex locked
     prev_state = currentState;
@@ -337,6 +342,7 @@ int32_t StreamSoundTrigger::start() {
     if (status)
         currentState = prev_state;
 
+    rm->unlockActiveStream();
     PAL_DBG(LOG_TAG, "Exit, status %d", status);
     return status;
 }
@@ -346,6 +352,11 @@ int32_t StreamSoundTrigger::stop() {
 
     PAL_DBG(LOG_TAG, "Enter, stream direction %d", mStreamAttr->direction);
 
+    /*
+     * Guard with mActiveStreamMutex to avoid concurrent
+     * RX stream getting released during EC disable
+     */
+    rm->lockActiveStream();
     std::lock_guard<std::mutex> lck(mStreamMutex);
     currentState = STREAM_STOPPED;
 
@@ -353,6 +364,7 @@ int32_t StreamSoundTrigger::stop() {
        new StStopRecognitionEventConfig(false));
     status = cur_state_->ProcessEvent(ev_cfg);
 
+    rm->unlockActiveStream();
     PAL_DBG(LOG_TAG, "Exit, status %d", status);
     return status;
 }
