@@ -3045,16 +3045,16 @@ int SpeakerProtection::viTxSetupThreadLoop()
         rm->getChannelMap(&(ch_info.ch_map[0]), vi_device.channels);
         ch_info.channels = vi_device.channels;
 
-        if (mDeviceAttr.id == PAL_DEVICE_OUT_HANDSET)
-                 ch_info.ch_map[0] = PAL_CHMAP_CHANNEL_FL;
-
         switch(vi_device.channels) {
         case 1:
             ch_info.channels = CHANNELS_1;
+            ch_info.ch_map[0] = PAL_CHMAP_CHANNEL_FR;
             config.channels = CHANNELS_1;
         break;
         case 2:
             ch_info.channels = CHANNELS_2;
+            ch_info.ch_map[0] = PAL_CHMAP_CHANNEL_FL;
+            ch_info.ch_map[1] = PAL_CHMAP_CHANNEL_FR;
             config.channels = CHANNELS_2;
         break;
         default:
@@ -3062,6 +3062,10 @@ int SpeakerProtection::viTxSetupThreadLoop()
             ch_info.channels = CHANNELS_2;
             config.channels = CHANNELS_2;
         }
+
+        if (mDeviceAttr.id == PAL_DEVICE_OUT_HANDSET)
+                 ch_info.ch_map[0] = PAL_CHMAP_CHANNEL_FL;
+
 
         device.config.ch_info = ch_info;
         device.config.sample_rate = vi_device.samplerate;
@@ -3185,6 +3189,22 @@ int SpeakerProtection::viTxSetupThreadLoop()
         }
 
         isTxFeandBeConnected = true;
+
+        switch (vi_device.bit_width) {
+            case 32 :
+                config.format = PCM_FORMAT_S32_LE;
+            break;
+            case 24 :
+                config.format = PCM_FORMAT_S24_LE;
+            break;
+            case 16:
+                config.format = PCM_FORMAT_S16_LE;
+            break;
+            default:
+                PAL_DBG(LOG_TAG, "Unsupported bit width. Set default as 16");
+                config.format = PCM_FORMAT_S16_LE;
+            break;
+        }
 
         flags = PCM_IN;
 
