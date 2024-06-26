@@ -28,7 +28,7 @@
  *
  * Changes from Qualcomm Innovation Center, Inc. are provided under the following license:
  *
- * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2025 Qualcomm Innovation Center, Inc. All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause-Clear
  */
 
@@ -3047,7 +3047,7 @@ int SessionAlsaPcm::setParameters(Stream *streamHandle, int tagId, uint32_t para
                 goto exit;
             }
             if (sAttr.direction == PAL_AUDIO_OUTPUT &&
-               (sAttr.type == PAL_STREAM_DEEP_BUFFER || PAL_STREAM_PCM_OFFLOAD)) {
+               ((sAttr.type == PAL_STREAM_DEEP_BUFFER) || (sAttr.type == PAL_STREAM_PCM_OFFLOAD))) {
                 status = SessionAlsaUtils::getModuleInstanceId(mixer, device,
                          rxAifBackEnds[0].second.data(), tagId, &miid);
                 PAL_DBG(LOG_TAG, "Gainlog - Get MIID status - %d", status);
