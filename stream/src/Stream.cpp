@@ -1,6 +1,5 @@
 /*
  * Copyright (c) 2019-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023, Qualcomm Innovation Center, Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -27,8 +26,8 @@
  * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
- * Changes from Qualcomm Innovation Center are provided under the following license:
- * Copyright (c) 2022-2023, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Changes from Qualcomm Innovation Center, Inc. are provided under the following license:
+ * Copyright (c) 2022-2024, Qualcomm Innovation Center, Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -874,25 +873,41 @@ int32_t Stream::handleBTDeviceNotReady(bool& a2dpSuspend)
         }
     }
 
-    /* A2DP device is not ready */
-    if (rm->isDeviceAvailable(mDevices, PAL_DEVICE_OUT_BLUETOOTH_A2DP)) {
-        dattr.id = PAL_DEVICE_OUT_BLUETOOTH_A2DP;
+    /* A2DP/BLE device is not ready */
+    if (rm->isDeviceAvailable(mDevices, PAL_DEVICE_OUT_BLUETOOTH_A2DP) ||
+        rm->isDeviceAvailable(mDevices, PAL_DEVICE_OUT_BLUETOOTH_BLE)) {
+        if (rm->isDeviceAvailable(mDevices, PAL_DEVICE_OUT_BLUETOOTH_A2DP)) {
+            dattr.id = PAL_DEVICE_OUT_BLUETOOTH_A2DP;
+        } else {
+            dattr.id = PAL_DEVICE_OUT_BLUETOOTH_BLE;
+        }
         dev = Device::getInstance(&dattr, rm);
         if (!dev) {
             status = -ENODEV;
-            PAL_ERR(LOG_TAG, "failed to get a2dp device object");
+            PAL_ERR(LOG_TAG, "failed to get a2dp/ble device object");
             goto exit;
         }
         dev->getDeviceParameter(PAL_PARAM_ID_BT_A2DP_SUSPENDED,
                         (void **)&param_bt_a2dp);
         if (param_bt_a2dp->a2dp_suspended == false) {
-            PAL_DBG(LOG_TAG, "BT A2DP output device is good to go");
+            PAL_DBG(LOG_TAG, "BT A2DP/BLE output device is good to go");
             goto exit;
         }
 
         if (rm->isDeviceAvailable(mDevices, PAL_DEVICE_OUT_SPEAKER)) {
             // If it's a2dp + speaker combo device, route to speaker.
-            PAL_INFO(LOG_TAG, "BT A2DP output device is not ready, route to speaker");
+            PAL_INFO(LOG_TAG, "BT A2DP/BLE output device is not ready, route to speaker");
+
+            /* In combo use case, if ringtone routed to a2dp + spkr and at that time a2dp/ble
+             * device is in suspended state, so during resume ringtone won't be able to route
+             * to BLE device. In that case, add both speaker and a2dp/ble into suspended devices
+             * list so that a2dp/ble will be restored during a2dpResume without removing speaker
+             * from stream
+             */
+            suspendedDevIds.clear();
+            suspendedDevIds.push_back(PAL_DEVICE_OUT_SPEAKER);
+            suspendedDevIds.push_back(dattr.id);
+
             for (auto iter = mDevices.begin(); iter != mDevices.end();) {
                 if ((*iter)->getSndDeviceId() == PAL_DEVICE_OUT_SPEAKER) {
                     iter++;
@@ -918,12 +933,12 @@ int32_t Stream::handleBTDeviceNotReady(bool& a2dpSuspend)
             }
         } else {
             // For non-combo device, mute the stream and route to speaker or handset
-            PAL_INFO(LOG_TAG, "BT A2DP output device is not ready");
+            PAL_INFO(LOG_TAG, "BT A2DP/BLE output device is not ready");
 
             // Mark the suspendedDevIds state early - As a2dpResume may happen during this time.
             a2dpSuspend = true;
             suspendedDevIds.clear();
-            suspendedDevIds.push_back(PAL_DEVICE_OUT_BLUETOOTH_A2DP);
+            suspendedDevIds.push_back(dattr.id);
 
             for (int i = 0; i < mDevices.size(); i++) {
                 rm->lockGraph();
@@ -932,6 +947,17 @@ int32_t Stream::handleBTDeviceNotReady(bool& a2dpSuspend)
                     PAL_ERR(LOG_TAG, "disconnectSessionDevice failed:%d", status);
                     rm->unlockGraph();
                     goto exit;
+                }
+                /* Special handling for aaudio usecase on A2DP/BLE.
+                * A2DP/BLE device starts even when stream is not in START state,
+                * hence stop A2DP/BLE device to match device start&stop count.
+                */
+                if (((mDevices[i]->getSndDeviceId() == PAL_DEVICE_OUT_BLUETOOTH_A2DP) ||
+                    (mDevices[i]->getSndDeviceId() == PAL_DEVICE_OUT_BLUETOOTH_BLE)) && isMMap) {
+                    status = mDevices[i]->stop();
+                    if (0 != status) {
+                        PAL_ERR(LOG_TAG, "BT A2DP/BLE device stop failed with status %d", status);
+                        }
                 }
                 status = mDevices[i]->close();
                 if (0 != status) {
@@ -1032,7 +1058,13 @@ int32_t Stream::disconnectStreamDevice_l(Stream* streamHandle, pal_device_id_t d
     int32_t status = 0;
 
     if (currentState == STREAM_IDLE) {
-        PAL_DBG(LOG_TAG, "stream is in %d state, no need to switch device", currentState);
+        for (int i = 0; i < mDevices.size(); i++) {
+            if (dev_id == mDevices[i]->getSndDeviceId()) {
+                mDevices.erase(mDevices.begin() + i);
+                PAL_DBG(LOG_TAG, "stream is in IDLE state, erase device: %d", dev_id);
+                break;
+            }
+        }
         status = 0;
         goto exit;
     }
@@ -1054,7 +1086,16 @@ int32_t Stream::disconnectStreamDevice_l(Stream* streamHandle, pal_device_id_t d
                 rm->unlockGraph();
                 goto exit;
             }
-            if (currentState != STREAM_INIT && currentState != STREAM_STOPPED) {
+            /* Special handling for aaudio usecase on A2DP/BLE.
+             * A2DP/BLE device starts even when stream is not in START state,
+             * hence stop A2DP/BLE device to match device start&stop count.
+             */
+
+            if ((currentState != STREAM_INIT && currentState != STREAM_STOPPED) ||
+                (currentState == STREAM_INIT &&
+                ((mDevices[i]->getSndDeviceId() == PAL_DEVICE_OUT_BLUETOOTH_A2DP) ||
+                (mDevices[i]->getSndDeviceId() == PAL_DEVICE_OUT_BLUETOOTH_BLE)) &&
+                 isMMap)) {
                 status = mDevices[i]->stop();
                 if (0 != status) {
                     PAL_ERR(LOG_TAG, "device stop failed with status %d", status);
@@ -1110,7 +1151,8 @@ int32_t Stream::connectStreamDevice_l(Stream* streamHandle, struct pal_device *d
     dev->setDeviceAttributes(*dattr);
 
     if (currentState == STREAM_IDLE) {
-        PAL_DBG(LOG_TAG, "stream is in %d state, no need to switch device", currentState);
+        PAL_DBG(LOG_TAG, "stream is in IDLE state, insert %d to mDevices", dev->getSndDeviceId());
+        mDevices.push_back(dev);
         status = 0;
         goto exit;
     }
@@ -1268,7 +1310,7 @@ int32_t Stream::switchDevice(Stream* streamHandle, uint32_t numDev, struct pal_d
     bool matchFound = false;
     bool voice_call_switch = false;
     uint32_t curDeviceSlots[PAL_DEVICE_IN_MAX], newDeviceSlots[PAL_DEVICE_IN_MAX];
-    std::vector <std::tuple<Stream *, uint32_t>> streamDevDisconnect, sharedBEStreamDev;
+    std::vector <std::tuple<Stream *, uint32_t>> streamDevDisconnect, sharedBEStreamDev, streamsSkippingSwitch;
     std::vector <std::tuple<Stream *, struct pal_device *>> StreamDevConnect;
     struct pal_device dAttr;
     pal_stream_type_t type;
@@ -1285,6 +1327,8 @@ int32_t Stream::switchDevice(Stream* streamHandle, uint32_t numDev, struct pal_d
     struct pal_volume_data *volume = NULL;
     pal_device_id_t newBtDevId;
     bool isBtReady = false;
+    struct pal_device spkr_devAttr;
+    pal_device_id_t curBtDevId;
 
     rm->lockActiveStream();
     mStreamMutex.lock();
@@ -1310,8 +1354,10 @@ int32_t Stream::switchDevice(Stream* streamHandle, uint32_t numDev, struct pal_d
         uint32_t tmp = numDev;
 
         mDevices[i]->getDeviceAttributes(&dAttr);
-        if (curDevId == PAL_DEVICE_OUT_BLUETOOTH_A2DP)
+        if (curDevId == PAL_DEVICE_OUT_BLUETOOTH_A2DP || curDevId == PAL_DEVICE_OUT_BLUETOOTH_BLE) {
             isCurDeviceA2dp = true;
+            curBtDevId = curDevId;
+        }
 
         if (curDevId == PAL_DEVICE_OUT_PROXY)
             isCurrentDeviceProxyOut = true;
@@ -1373,7 +1419,7 @@ int32_t Stream::switchDevice(Stream* streamHandle, uint32_t numDev, struct pal_d
          */
         // This assumes that PAL_DEVICE_NONE comes as single device
         if ((newDevices[i].id == PAL_DEVICE_NONE) &&
-            (((isCurDeviceA2dp == true) && !rm->isDeviceReady(PAL_DEVICE_OUT_BLUETOOTH_A2DP)) ||
+            (((isCurDeviceA2dp == true) && (!rm->isDeviceReady(curBtDevId))) ||
              (isCurrentDeviceProxyOut) || (isCurrentDeviceDpOut))) {
             newDevices[i].id = PAL_DEVICE_OUT_SPEAKER;
 
@@ -1394,6 +1440,10 @@ int32_t Stream::switchDevice(Stream* streamHandle, uint32_t numDev, struct pal_d
         *  for 2 secs causing audioserver to stuck for processing
         *  disconnection. Thus check for isCurDeviceA2dp and a2dp_suspended
         *  state to avoid unnecessary sleep over 2 secs.
+        *
+        *  Also check for combo devices for the stream and do not retry for
+        *  combo streams. This will ensure seamless playback over Speaker
+        *  even if BT device is not ready.
         */
         if (newDevices[i].id == PAL_DEVICE_OUT_BLUETOOTH_A2DP) {
             isNewDeviceA2dp = true;
@@ -1415,8 +1465,9 @@ int32_t Stream::switchDevice(Stream* streamHandle, uint32_t numDev, struct pal_d
                         break;
                     } else if (isCurDeviceA2dp) {
                         break;
+                    } else if (rm->isDeviceAvailable(newDevices, numDev, PAL_DEVICE_OUT_SPEAKER)) {
+                        break;
                     }
-
                     usleep(retryPeriodMs * 1000);
                 }
             }
@@ -1426,18 +1477,23 @@ int32_t Stream::switchDevice(Stream* streamHandle, uint32_t numDev, struct pal_d
 
         if (!devReadyStatus) {
             PAL_ERR(LOG_TAG, "Device %d is not ready", newDevices[i].id);
-            if ((newDevices[i].id == PAL_DEVICE_OUT_BLUETOOTH_A2DP) &&
+            if (((newDevices[i].id == PAL_DEVICE_OUT_BLUETOOTH_A2DP) ||
+                (newDevices[i].id == PAL_DEVICE_OUT_BLUETOOTH_BLE)) &&
                 !(rm->isDeviceAvailable(newDevices, numDev, PAL_DEVICE_OUT_SPEAKER))) {
                 /* update suspended device to a2dp and don't route as BT returned error
                  * However it is still possible a2dp routing called as part of a2dp restore
                  */
                 PAL_ERR(LOG_TAG, "A2DP profile is not ready, ignoring routing request");
                 suspendedDevIds.clear();
-                suspendedDevIds.push_back(PAL_DEVICE_OUT_BLUETOOTH_A2DP);
+                suspendedDevIds.push_back(newDevices[i].id);
             }
         } else {
             newDeviceSlots[connectCount] = i;
             connectCount++;
+
+            if (newDevices[i].id == PAL_DEVICE_OUT_BLUETOOTH_A2DP ||
+                newDevices[i].id == PAL_DEVICE_OUT_BLUETOOTH_BLE)
+                isNewDeviceA2dp = true;
         }
 
         /* store or update palDev before newDevices can be changed */
@@ -1482,6 +1538,55 @@ int32_t Stream::switchDevice(Stream* streamHandle, uint32_t numDev, struct pal_d
            PAL_DBG(LOG_TAG, "isComboHeadsetActive false");
            strAttr.isComboHeadsetActive = false;
         }
+
+        /*
+         * Special case for UPD concurrency, UPD only supports handset or speaker.
+         * If HANDSET device shares backend with headphone, then when headphone
+         * is coming, UPD needs to switch to speaker temporarily.
+         * If UPD is already temporarily on speaker and the incoming device is speaker,
+         * skip the handling below and UPD needs to switch back to handset instead.
+         */
+        if (sharedBEStreamDev.size() > 0 && newDeviceId != PAL_DEVICE_OUT_SPEAKER) {
+            std::vector <std::tuple<Stream *, uint32_t>>::iterator iter;
+            for (iter = sharedBEStreamDev.begin(); iter != sharedBEStreamDev.end(); iter++) {
+                struct pal_stream_attributes sAttr;
+                std::vector<Stream*> activeStreams;
+                Stream *sharedStream = std::get<0>(*iter);
+                sharedStream->getStreamAttributes(&sAttr);
+                if (!rm->isValidDeviceSwitchForStream(std::get<0>(*iter), newDeviceId)) {
+                    spkr_devAttr.id = PAL_DEVICE_OUT_SPEAKER;
+                    std::shared_ptr<Device> spkObj = Device::getInstance(&spkr_devAttr, rm);
+                    status = rm->getDeviceConfig(&spkr_devAttr, &sAttr);
+                    if (status) {
+                        PAL_ERR(LOG_TAG, "Error getting deviceConfig");
+                        mStreamMutex.unlock();
+                        rm->unlockActiveStream();
+                        return status;
+                    }
+                    streamDevDisconnect.push_back(*iter);
+                    StreamDevConnect.push_back({std::get<0>(*iter), &spkr_devAttr});
+                    sharedBEStreamDev.erase(iter);
+                    // If new devices contains speaker device, reroute current streams
+                    // which are on speaker by updating to UPD speaker dev attr
+                    rm->getActiveStream_l(activeStreams, spkObj);
+                    if (!activeStreams.size())
+                        break;
+                    for (int j = 0; j < connectCount; j++) {
+                        if (newDevices[newDeviceSlots[j]].id == PAL_DEVICE_OUT_SPEAKER) {
+                            for (auto it = activeStreams.begin(); it != activeStreams.end(); it++) {
+                                streamDevDisconnect.push_back({(*it), PAL_DEVICE_OUT_SPEAKER});
+                                StreamDevConnect.push_back({(*it), &spkr_devAttr});
+                            }
+                            ar_mem_cpy(&newDevices[newDeviceSlots[j]], sizeof(struct pal_device),
+                                       &spkr_devAttr, sizeof(struct pal_device));
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
         /* This can result in below situation:
          * 1) No matching SharedBEStreamDev (handled in else part).
          *    e.g. - case 1a, 2.
@@ -1609,9 +1714,8 @@ int32_t Stream::switchDevice(Stream* streamHandle, uint32_t numDev, struct pal_d
             rm->checkHapticsConcurrency(&newDevices[newDeviceSlots[i]], NULL, streamsToSwitch/* not used */, NULL);
         }
         /*
-         * switch all streams that are running on the current device if:
-         * 1. switching device for Voice Call
-         * 2. switching device for Rx stream currently using same rx device as voice call
+         * switch all streams that are running on the current device if
+         * switching device for Voice Call
          */
         sharedBEStreamDev.clear();
         for (int j = 0; j < mDevices.size(); j++) {
@@ -1623,18 +1727,14 @@ int32_t Stream::switchDevice(Stream* streamHandle, uint32_t numDev, struct pal_d
                 if (type == PAL_STREAM_VOICE_CALL &&
                     newDeviceId != PAL_DEVICE_OUT_HEARING_AID) {
                     voice_call_switch = true;
-                } else if (rm->isOutputDevId(mDevices[j]->getSndDeviceId())) {
-                    for (const auto &elem : sharedBEStreamDev) {
-                        std::get<0>(elem)->getStreamAttributes(&strAttr);
-                        if (strAttr.type == PAL_STREAM_VOICE_CALL &&
-                            newDeviceId != PAL_DEVICE_OUT_HEARING_AID) {
-                            voice_call_switch = true;
-                            break;
-                        }
-                    }
                 }
                 if (voice_call_switch) {
                     for (const auto &elem : sharedBEStreamDev) {
+                        if (!rm->isValidDeviceSwitchForStream(std::get<0>(elem), newDevices[newDeviceSlots[i]].id)) {
+                            streamsSkippingSwitch.push_back(elem);
+                            continue;
+                        }
+
                         streamDevDisconnect.push_back(elem);
                         StreamDevConnect.push_back({std::get<0>(elem), &newDevices[newDeviceSlots[i]]});
                     }
@@ -1694,8 +1794,16 @@ int32_t Stream::switchDevice(Stream* streamHandle, uint32_t numDev, struct pal_d
         rm->unlockActiveStream();
         goto done;
     }
+
     mStreamMutex.unlock();
     rm->unlockActiveStream();
+
+    status = rm->restoreDeviceConfigForUPD(streamDevDisconnect, StreamDevConnect,
+                                           streamsSkippingSwitch);
+    if (status) {
+        PAL_ERR(LOG_TAG, "Error restoring device config for UPD");
+        goto done;
+    }
 
     status = rm->streamDevSwitch(streamDevDisconnect, StreamDevConnect);
     if (status) {
